@@ -12,7 +12,7 @@ from PCBTokenizer import PCBTokenizer, PCBDataset
 
 
 # 训练函数（包含Token正确率统计）
-def train_epoch(model, train_loader, criterion, optimizer, device, pad_token):
+def train_model(model, train_loader, criterion, optimizer, device, pad_token):
     """训练一个epoch，返回平均损失和Token正确率"""
     model.train()
     total_loss = 0.0
@@ -22,7 +22,7 @@ def train_epoch(model, train_loader, criterion, optimizer, device, pad_token):
     for batch in tqdm(train_loader, desc="Training"):
         tokens = batch["tokens"].to(device)
 
-        # 前n-1个token作为输入，后n-1个token作为目标（自回归训练逻辑）
+        # 前n-1个token作为输入，后n-1个token作为目标
         input_tokens = tokens[:, :-1]
         target_tokens = tokens[:, 1:]
 
@@ -60,7 +60,7 @@ def train_epoch(model, train_loader, criterion, optimizer, device, pad_token):
 
 
 # 验证函数（包含Token正确率统计）
-def validate(model, val_loader, criterion, device, pad_token):
+def validate_model(model, val_loader, criterion, device, pad_token):
     """验证模型，返回平均损失和Token正确率"""
     model.eval()
     total_loss = 0.0
@@ -100,8 +100,27 @@ def validate(model, val_loader, criterion, device, pad_token):
     accuracy = (total_correct / total_valid_tokens) * 100 if total_valid_tokens > 0 else 0.0
     return avg_loss, accuracy
 
-
 # 测试函数
+def predict_route(model, tokenizer, prompt_tokens, max_length, device):
+    """
+    预测PCB布线信息（从<SOS>到<SODPS>为提示，生成后续布线token）
+    """
+    model.eval()
+
+    # 将提示移到设备上
+    prompt = prompt_tokens.to(device)
+
+    # 生成预测（使用预划分的编码表特殊标记）
+    generated = model.generate(
+        prompt,
+        max_length=max_length,
+        pad_token=tokenizer.special_tokens["<PAD>"],
+        eos_token=tokenizer.special_tokens["<EOS>"]
+    )
+
+    return generated.cpu()  # 转回CPU以便后续处理
+
+
 def test_model(model, test_loader, criterion, device, pad_token):
     """测试模型，返回平均损失和Token正确率"""
     model.eval()
@@ -151,26 +170,6 @@ def find_token_position(tokens, token_value):
     return positions[0, 1].item()  # 返回第一个匹配位置（按batch第一个样本）
 
 
-def predict_route(model, tokenizer, prompt_tokens, max_length, device):
-    """
-    预测PCB布线信息（从<SOS>到<SODPS>为提示，生成后续布线token）
-    """
-    model.eval()
-
-    # 将提示移到设备上
-    prompt = prompt_tokens.to(device)
-
-    # 生成预测（使用预划分的编码表特殊标记）
-    generated = model.generate(
-        prompt,
-        max_length=max_length,
-        pad_token=tokenizer.special_tokens["<PAD>"],
-        eos_token=tokenizer.special_tokens["<EOS>"]
-    )
-
-    return generated.cpu()  # 转回CPU以便后续处理
-
-
 def train(train_flag=True):
     if not train_flag:
         return
@@ -205,7 +204,7 @@ def train(train_flag=True):
             max_length=config["max_length"]
         )
 
-        # 划分训练集和验证集（80%训练，20%验证）
+        # 划分训练集和验证集
         val_size = int(0.1 * len(full_train_dataset))
         train_size = len(full_train_dataset) - val_size
         train_dataset, val_dataset = random_split(
@@ -271,7 +270,7 @@ def train(train_flag=True):
     )
 
     # -------------------------- 6. 训练模型（每10轮验证一次） --------------------------
-    print(f"\n开始训练（含Token正确率统计，每10轮验证一次）")
+    print(f"\n开始训练")
     best_val_loss = float('inf')  # 记录最佳验证损失
     # 记录每轮的损失和正确率
     train_losses = []
@@ -287,7 +286,7 @@ def train(train_flag=True):
         print(f"\n=== Epoch {epoch + 1}/{config['epochs']} ===")
 
         # 训练一轮（返回损失和正确率）
-        train_loss, train_acc = train_epoch(
+        train_loss, train_acc = train_model(
             model=model,
             train_loader=train_loader,
             criterion=criterion,
@@ -310,7 +309,7 @@ def train(train_flag=True):
                     batch_size=len(val_batch),
                     shuffle=False
                 )
-                val_loss, val_acc = validate(
+                val_loss, val_acc = validate_model(
                     model=model,
                     val_loader=temp_val_loader,
                     criterion=criterion,
@@ -326,7 +325,7 @@ def train(train_flag=True):
                     batch_size=len(val_batch),
                     shuffle=False
                 )
-                val_loss, val_acc = validate(
+                val_loss, val_acc = validate_model(
                     model=model,
                     val_loader=temp_val_loader,
                     criterion=criterion,
@@ -356,35 +355,35 @@ def train(train_flag=True):
                 print(
                     f"保存最佳模型（验证损失: {best_val_loss:.4f} | 验证正确率: {val_acc:.2f}%）到 {config['save_path']}")
 
-            # 绘制并保存当前的损失和正确率曲线
-            try:
-                plt.figure(figsize=(12, 6))
-                # 绘制损失曲线
-                plt.plot(range(1, len(train_losses) + 1), train_losses, label='训练损失', linewidth=2)
-                plt.plot(val_epochs, val_losses, label='验证损失', linewidth=2)
+        # 绘制并保存当前的损失和正确率曲线
+        try:
+            plt.figure(figsize=(12, 6))
+            # 绘制损失曲线
+            plt.plot(range(1, len(train_losses) + 1), train_losses, label='train loss', linewidth=2)
+            plt.plot(val_epochs, val_losses, label='val loss', linewidth=2)
 
-                # 绘制正确率曲线（双Y轴）
-                ax2 = plt.gca().twinx()
-                ax2.plot(range(1, len(train_accs) + 1), train_accs, 'r--', label='训练Token正确率', linewidth=2)
-                ax2.plot(val_epochs, val_accs, 'orange', label='验证Token正确率', linewidth=2)
+            # 绘制正确率曲线（双Y轴）
+            ax2 = plt.gca().twinx()
+            ax2.plot(range(1, len(train_accs) + 1), train_accs, 'r--', label='train token acc', linewidth=2)
+            ax2.plot(val_epochs, val_accs, 'orange', label='val token acc', linewidth=2)
 
-                # 坐标轴设置
-                plt.gca().set_xlabel('训练轮数（Epoch）', fontsize=12)
-                plt.gca().set_ylabel('损失值', fontsize=12, color='black')
-                ax2.set_ylabel('Token正确率（%）', fontsize=12, color='red')
-                plt.gca().set_title(f'PCB Transformer 损失&Token正确率曲线（Epoch {epoch + 1}）', fontsize=14,
-                                    fontweight='bold')
+            # 坐标轴设置
+            plt.gca().set_xlabel('Epoch', fontsize=12)
+            plt.gca().set_ylabel('loss', fontsize=12, color='black')
+            ax2.set_ylabel('Token acc（%）', fontsize=12, color='red')
+            plt.gca().set_title(f'PCB Transformer loss&token loss（Epoch {epoch + 1}）', fontsize=14,
+                                fontweight='bold')
 
-                # 合并图例
-                lines1, labels1 = plt.gca().get_legend_handles_labels()
-                lines2, labels2 = ax2.get_legend_handles_labels()
-                plt.gca().legend(lines1 + lines2, labels1 + labels2, fontsize=10, loc='upper right')
+            # 合并图例
+            lines1, labels1 = plt.gca().get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            plt.gca().legend(lines1 + lines2, labels1 + labels2, fontsize=10, loc='upper right')
 
-                plt.grid(True, alpha=0.3)
-                plt.savefig(f'pic/train/loss_acc_curve_epoch_{epoch + 1}.png', dpi=300, bbox_inches='tight')
-                plt.close()
-            except Exception as e:
-                print(f"⚠ 绘制曲线失败: {str(e)}")
+            plt.grid(True, alpha=0.3)
+            plt.savefig(f'pic/train/loss_acc_curve_epoch_{epoch + 1}.png', dpi=300, bbox_inches='tight')
+            plt.close()
+        except Exception as e:
+            print(f"绘制曲线失败: {str(e)}")
 
     # -------------------------- 训练完成 --------------------------
     print(f"\n训练流程全部完成！")
@@ -405,7 +404,6 @@ def test(test_flag=True):
     print("=" * 60)
     print(f"测试集目录: {os.path.abspath(config['test_dir'])}")
     print(f"使用设备: {config['device']}")
-    print(f"序列最大长度: {config['max_length']} | 批次大小: {config['batch_size']}")
 
     # -------------------------- 1. 初始化Tokenizer --------------------------
     try:
@@ -433,7 +431,7 @@ def test(test_flag=True):
     # -------------------------- 3. 创建测试DataLoader --------------------------
     test_loader = DataLoader(
         test_dataset,
-        batch_size=config["batch_size"],
+        batch_size=1,
         shuffle=False,  # 测试集不打乱
         num_workers=4,
         pin_memory=True
@@ -460,57 +458,51 @@ def test(test_flag=True):
         return
 
     # -------------------------- 5. 进行测试 --------------------------
-    criterion = nn.CrossEntropyLoss(reduction='none')
-    test_loss, test_acc = test_model(
-        model=model,
-        test_loader=test_loader,
-        criterion=criterion,
-        device=config["device"],
-        pad_token=tokenizer.special_tokens["<PAD>"]
-    )
+    total_token_acc = 0
 
-    print(f"\n测试结果:")
-    print(f"  测试损失: {test_loss:.4f} | 测试Token正确率: {test_acc:.2f}%")
-
-    # -------------------------- 6. 预测示例 --------------------------
     try:
-        # 从测试集选取一个样本做预测示例
-        sample_idx = 0  # 选取测试集第1个样本
-        sample_data = test_dataset[sample_idx]
-        sample_tokens = sample_data["tokens"].unsqueeze(0)  # 添加batch维度
-        sample_filename = sample_data["filename"]
-        print(f"\n预测示例（测试集样本: {sample_filename}）")
+        for batch in tqdm(test_loader, desc="Testing"):
+            sample_tokens = batch["tokens"].to(config["device"])
+            sample_filename = batch["filename"]
+            print(f"\n预测示例（测试集样本: {sample_filename}）")
 
-        # 提取提示序列：从<SOS>到<SODPS>
-        sodps_token = tokenizer.special_tokens["<SODPS>"]
-        sodps_pos = find_token_position(sample_tokens, sodps_token)
-        if sodps_pos == -1:
-            print(f"样本 {sample_filename} 中未找到<SODPS>标记，无法生成提示")
-            return
+            # 提取提示序列：从<SOS>到<SODPS>
+            sodps_token = tokenizer.special_tokens["<SODPS>"]
+            sodps_pos = find_token_position(sample_tokens, sodps_token)
+            if sodps_pos == -1:
+                print(f"样本 {sample_filename} 中未找到<SODPS>标记，无法生成提示")
+                return
 
-        # 提示序列：包含<SOS>到<SODPS>的所有token
-        prompt_tokens = sample_tokens[:, :sodps_pos + 1].to(config["device"])
+            # 提示序列：包含<SOS>到<SODPS>的所有token
+            prompt_tokens = sample_tokens[:, :sodps_pos + 1].to(config["device"])
 
-        # 计算最大生成长度
-        max_gen_length = config["max_length"] - prompt_tokens.size(1)
-        if max_gen_length <= 0:
-            print(f"提示序列长度已达到max_length，无法生成更多token")
-            return
+            # 计算最大生成长度
+            max_gen_length = config["max_length"] - prompt_tokens.size(1)
+            if max_gen_length <= 0:
+                print(f"提示序列长度已达到max_length，无法生成更多token")
+                return
 
-        # 生成布线信息
-        generated_tokens = predict_route(
-            model=model,
-            tokenizer=tokenizer,
-            prompt_tokens=prompt_tokens,
-            max_length=max_gen_length,
-            device=config["device"]
-        )
+            # 生成布线信息
+            generated_tokens = predict_route(
+                model=model,
+                tokenizer=tokenizer,
+                prompt_tokens=prompt_tokens,
+                max_length=max_gen_length,
+                device=config["device"]
+            )
 
-        # 打印预测结果
-        print(f"\n预测结果:")
-        print(f"  完整序列长度: {generated_tokens.size(1)}")
-        print(f"  生成token: {generated_tokens[0, sodps_pos + 1:]}")
-        print(f"  是否生成<EOS>标记: {'是' if (generated_tokens == tokenizer.special_tokens['<EOS>']).any() else '否'}")
+            # 打印预测结果
+            print(f"\n预测结果:")
+            print(f"  标签token：{sample_tokens[0, sodps_pos + 1:]}")
+            print(f"  生成token: {generated_tokens[0, sodps_pos + 1:]}")
+
+
+            # 计算Token正确率
+            token_acc = sum((sample_tokens[0, sodps_pos + 1:] == generated_tokens[0, sodps_pos + 1:]) & (sample_tokens[0, sodps_pos + 1:] != 0).sum()) / torch.count_nonzero(sample_tokens[0, sodps_pos + 1:])
+            total_token_acc += token_acc / len(test_dataset)
+            print(f"  token准确率：{token_acc}")
+
+        print(f"token正确率：{total_token_acc}")
 
     except Exception as e:
         print(f"\n预测示例失败: {str(e)}")
@@ -522,8 +514,8 @@ def test(test_flag=True):
 
 if __name__ == "__main__":
     # 可以通过修改这两个标志来控制执行训练还是测试
-    train_flag = True
-    test_flag = False
+    train_flag = False
+    test_flag = True
 
     if train_flag:
         train()

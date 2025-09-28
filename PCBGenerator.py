@@ -11,21 +11,21 @@ from datetime import datetime
 
 
 class PCBGenerator:
-    def __init__(self, pcb_size=(30, 30), main_comp_min_size=(8, 8), main_comp_max_size=(10, 10),
-                 sub_comp_size=(2, 1), num_sub_comps=10):
+    def __init__(self, pcb_size, main_max_comp_size, main_min_comp_size, sub_max_comp_size, sub_min_comp_size, num_sub_comps=10):
         """Initialize PCB generator with enhanced routing capabilities"""
-        self.pcb_size = pcb_size
-        self.main_comp_min_size = main_comp_min_size
-        self.main_comp_max_size = main_comp_max_size
-        self.sub_comp_size = sub_comp_size
-        self.num_sub_comps = num_sub_comps
+        self.pcb_size = pcb_size  # (width, height) of PCB
+        self.main_max_comp_size = main_max_comp_size  # (max_w, max_h) for main component
+        self.main_min_comp_size = main_min_comp_size  # (min_w, min_h) for main component
+        self.sub_max_comp_size = sub_max_comp_size    # (max_w, max_h) for sub components
+        self.sub_min_comp_size = sub_min_comp_size    # (min_w, min_h) for sub components
+        self.num_sub_comps = num_sub_comps  # Number of sub components (matches main component pins)
 
         # Generated PCB data
         self.pcb_data = None
 
         # Track occupied grid positions, wire paths and pin positions
         self.occupied_grid = set()  # 器件占据的网格
-        self.wire_paths = set()  # 布线占据的网格
+        self.wire_paths = set()     # 布线占据的网格
         self.pin_positions = set()  # 所有pin脚的位置
 
         # 记录主器件每个pin脚所在的边
@@ -33,15 +33,14 @@ class PCBGenerator:
 
     def generate_main_component(self):
         """生成主器件，确保四周留有足够布线空间"""
-        # 随机生成主器件尺寸 (8x8 到 10x10之间)
-        width = random.randint(self.main_comp_min_size[0], self.main_comp_max_size[0])
-        height = random.randint(self.main_comp_min_size[1], self.main_comp_max_size[1])
+        # 随机生成主器件尺寸（原逻辑保留）
+        width = random.randint(self.main_min_comp_size[0], self.main_max_comp_size[0])
+        height = random.randint(self.main_min_comp_size[1], self.main_max_comp_size[1])
 
         # 增大边距确保周围有足够布线空间
         margin = 8
         max_x = self.pcb_size[0] - width - margin
         max_y = self.pcb_size[1] - height - margin
-
         min_x = margin
         min_y = margin
 
@@ -54,13 +53,12 @@ class PCBGenerator:
             for j in range(y, y + height + 1):
                 self.occupied_grid.add((i, j))
 
-        # 为主器件生成10个均匀分布在四条边上的pin脚
+        # 为主器件生成指定数量的均匀分布在四条边上的pin脚
         pins = {}
         total_pins = self.num_sub_comps
 
         # 计算每条边放置多少个pin脚 (尽可能均匀)
-        edge_pin_counts = self._get_edge_pin_counts(total_pins)
-        # edge_pin_counts 顺序: [bottom, right, top, left]
+        edge_pin_counts = self._get_edge_pin_counts(total_pins)  # [bottom, right, top, left]
 
         # 为每条边生成pin脚
         pin_index = 1
@@ -129,7 +127,7 @@ class PCBGenerator:
                     pins[f"pin{pin_index}"] = [pin_x - x, pin_y - y]
                     pin_index += 1
 
-        # 确保生成足够的pin脚
+        # 确保生成足够的pin脚（补全逻辑）
         while pin_index <= total_pins:
             placed = False
             attempts = 0
@@ -182,112 +180,140 @@ class PCBGenerator:
         return counts
 
     def generate_sub_components(self, main_comp):
-        """优化子器件布局，确保留有布线通道"""
+        """优化子器件布局，确保留有布线通道（子器件大小随机）"""
         sub_comps = []
         main_x, main_y = main_comp["bottom_left_position"]
         main_width, main_height = main_comp["contour_size"]
         main_pins = main_comp["pins"]
         pin_edges = main_comp["pin_edges"]
 
-        sub_comp_width, sub_comp_height = self.sub_comp_size
-        spacing = 2  # 增加子器件间距，为布线留出空间
+        spacing = 2  # 子器件间距，为布线留出空间
 
-        # 按边分组pin脚
+        # 按边分组pin脚（后续按边布局子器件）
         edge_pins = {
             "left": [],
             "right": [],
             "top": [],
             "bottom": []
         }
-
         for pin_name in main_pins.keys():
             edge = pin_edges[pin_name]
             edge_pins[edge].append(pin_name)
 
-        # 为每条边的子器件生成规整位置
+        # 为每条边的子器件生成规整位置（子器件大小随机）
         for edge, pins in edge_pins.items():
             if not pins:
                 continue
 
+            # 1. 按pin脚位置排序（确保子器件与pin脚顺序对应）
             sorted_pins = self._sort_pins_by_position(edge, pins, main_comp)
+            num_subs = len(sorted_pins)
 
-            # 计算该边子器件的起始位置，确保远离主器件留出布线空间
+            # 2. 为每个子器件生成随机大小（在sub_min和sub_max之间）
+            sub_sizes = []  # 存储 (width, height)，顺序与sorted_pins一致
+            for _ in range(num_subs):
+                # 宽度：sub_min_comp_size[0] ~ sub_max_comp_size[0]
+                sub_w = random.randint(self.sub_min_comp_size[0], self.sub_max_comp_size[0])
+                # 高度：sub_min_comp_size[1] ~ sub_max_comp_size[1]
+                sub_h = random.randint(self.sub_min_comp_size[1], self.sub_max_comp_size[1])
+                sub_sizes.append((sub_w, sub_h))
+
+            # 3. 计算布局关键参数（总长度+最大尺寸，用于确定起始位置）
+            if edge in ["left", "right"]:  # 垂直排列（子器件上下堆叠）
+                # 总长度 = 所有子器件高度之和 + 间距*(数量-1)
+                total_length = sum(h for _, h in sub_sizes) + (num_subs - 1) * spacing
+                # 最大宽度 = 所有子器件宽度的最大值（确保水平方向不超出）
+                max_width = max(w for w, _ in sub_sizes)
+            else:  # top/bottom（水平排列，子器件左右排列）
+                # 总长度 = 所有子器件宽度之和 + 间距*(数量-1)
+                total_length = sum(w for w, _ in sub_sizes) + (num_subs - 1) * spacing
+                # 最大高度 = 所有子器件高度的最大值（确保垂直方向不超出）
+                max_height = max(h for _, h in sub_sizes)
+
+            # 4. 计算子器件起始位置（基于边的位置和布局参数）
             start_x, start_y = self._calculate_sub_comp_start_position(
                 edge, main_x, main_y, main_width, main_height,
-                sub_comp_width, sub_comp_height, len(pins)
+                total_length, max_width if edge in ["left", "right"] else max_height
             )
 
-            # 为每个pin脚生成对应的子器件
-            for i, pin_name in enumerate(sorted_pins):
-                if edge in ["left", "right"]:
+            # 5. 为每个子器件生成具体位置并记录
+            current_offset = 0  # 记录当前子器件的偏移量（垂直/水平方向）
+            for pin_name, (sub_w, sub_h) in zip(sorted_pins, sub_sizes):
+                # 根据排列方向计算当前子器件的坐标
+                if edge in ["left", "right"]:  # 垂直排列：x固定，y随偏移量变化
                     x = start_x
-                    y = start_y + i * (sub_comp_height + spacing)
-                else:  # top, bottom
-                    x = start_x + i * (sub_comp_width + spacing)
+                    y = start_y + current_offset
+                    # 更新偏移量（下一个子器件 = 当前高度 + 间距）
+                    current_offset += sub_h + spacing
+                else:  # 水平排列：y固定，x随偏移量变化
+                    x = start_x + current_offset
                     y = start_y
+                    # 更新偏移量（下一个子器件 = 当前宽度 + 间距）
+                    current_offset += sub_w + spacing
 
-                # 确保子器件在PCB范围内
-                if not self._is_inside_pcb(x, y, sub_comp_width, sub_comp_height):
-                    x = max(1, min(x, self.pcb_size[0] - sub_comp_width - 1))
-                    y = max(1, min(y, self.pcb_size[1] - sub_comp_height - 1))
+                # 6. 确保子器件在PCB范围内（边界调整）
+                if not self._is_inside_pcb(x, y, sub_w, sub_h):
+                    x = max(1, min(x, self.pcb_size[0] - sub_w - 1))
+                    y = max(1, min(y, self.pcb_size[1] - sub_h - 1))
 
-                # 检查位置是否有效，增加布线空间检查
+                # 7. 检查位置有效性（包括周围布线空间）
                 valid_position = True
-                # 不仅检查子器件本身，还要检查周围预留的布线空间
-                for dx in range(x - 1, x + sub_comp_width + 2):
-                    for dy in range(y - 1, y + sub_comp_height + 2):
+                for dx in range(x - 1, x + sub_w + 2):  # 额外检查周围1格空间
+                    for dy in range(y - 1, y + sub_h + 2):
                         if (dx, dy) in self.occupied_grid:
                             valid_position = False
                             break
                     if not valid_position:
                         break
 
+                # 位置无效时，寻找附近可用位置
                 if not valid_position:
-                    x, y = self._find_nearby_position(x, y, sub_comp_width, sub_comp_height)
+                    x, y = self._find_nearby_position(x, y, sub_w, sub_h)
                     if x is None:
                         print(f"Warning: Could not find valid position for sub-component {pin_name}")
                         continue
 
-                # 记录子器件占据的网格，包括周围的保护区域
-                for dx in range(sub_comp_width + 1):
-                    for dy in range(sub_comp_height + 1):
+                # 8. 记录子器件占据的网格（包括本体）
+                for dx in range(sub_w + 1):
+                    for dy in range(sub_h + 1):
                         self.occupied_grid.add((x + dx, y + dy))
 
-                # 生成子器件pin脚
-                pin_position = self._generate_sub_comp_pin(edge, x, y, sub_comp_width, sub_comp_height)
-
+                # 9. 生成子器件pin脚（基于当前子器件的实际大小）
+                pin_position = self._generate_sub_comp_pin(edge, x, y, sub_w, sub_h)
                 if pin_position is None:
                     print(f"Warning: Could not generate pin for sub-component {pin_name}")
                     continue
 
+                # 10. 记录pin脚位置（从占据网格中移除，避免冲突）
                 self.pin_positions.add(pin_position)
                 if pin_position in self.occupied_grid:
                     self.occupied_grid.remove(pin_position)
 
+                # 11. 整理子器件信息
                 sub_comp_num = int(pin_name.replace("pin", ""))
                 sub_comp_name = f"sub_component_{sub_comp_num}"
-
-                sub_comp = {
+                sub_comps.append({
                     sub_comp_name: {
                         "bottom_left_position": [x, y],
-                        "contour_size": [sub_comp_width, sub_comp_height],
+                        "contour_size": [sub_w, sub_h],  # 保存随机生成的大小
                         "pins": {
-                            "pin1": [pin_position[0] - x, pin_position[1] - y]
+                            "pin1": [pin_position[0] - x, pin_position[1] - y]  # pin脚相对坐标
                         },
                         "connected_main_pin": pin_name
                     }
-                }
-                sub_comps.append(sub_comp)
+                })
 
+        # 按子器件编号排序（确保一致性）
         sub_comps.sort(key=lambda x: int(list(x.keys())[0].replace("sub_component_", "")))
         return sub_comps
 
     def _sort_pins_by_position(self, edge, pins, main_comp):
-        """按pin脚在主器件边上的位置排序"""
+        """按pin脚在主器件边上的位置排序（确保子器件布局顺序合理）"""
         main_x, main_y = main_comp["bottom_left_position"]
         main_width, main_height = main_comp["contour_size"]
         main_pins = main_comp["pins"]
 
+        # 计算每个pin脚的绝对坐标
         pin_positions = {}
         for pin_name in pins:
             rel_x, rel_y = main_pins[pin_name]
@@ -295,83 +321,90 @@ class PCBGenerator:
             abs_y = main_y + rel_y
             pin_positions[pin_name] = (abs_x, abs_y)
 
+        # 按边的方向排序：底边/顶边按x排序，左边/右边按y排序
         if edge in ["bottom", "top"]:
-            return sorted(pins, key=lambda p: pin_positions[p][0])
+            return sorted(pins, key=lambda p: pin_positions[p][0])  # 水平方向排序
         else:
-            return sorted(pins, key=lambda p: pin_positions[p][1])
+            return sorted(pins, key=lambda p: pin_positions[p][1])  # 垂直方向排序
 
     def _calculate_sub_comp_start_position(self, edge, main_x, main_y, main_width, main_height,
-                                           sub_width, sub_height, num_sub_comps):
-        """优化子器件起始位置，增加与主器件的距离以留出布线空间"""
-        margin = 3  # 增加边距，为主器件和子器件之间留出布线通道
+                                           total_length, max_dim):
+        """计算子器件起始位置（适配随机大小，确保远离主器件且居中）"""
+        margin = 3  # 主器件与子器件之间的最小间距（布线空间）
 
         if edge == "left":
-            x = main_x - sub_width - margin
-            total_height = num_sub_comps * sub_height + (num_sub_comps - 1) * 2
-            y = main_y + (main_height - total_height) // 2
+            # 垂直排列（左側）：x = 主器件左边界 - 间距 - 最大子器件宽度
+            x = main_x - margin - max_dim
+            # y = 主器件y + (主器件高度 - 子器件总长度)/2（垂直居中）
+            y = main_y + (main_height - total_length) // 2
+            y = max(1, y)  # 确保不超出PCB上边界
             return x, y
 
         elif edge == "right":
+            # 垂直排列（右側）：x = 主器件右边界 + 间距
             x = main_x + main_width + margin
-            total_height = num_sub_comps * sub_height + (num_sub_comps - 1) * 2
-            y = main_y + (main_height - total_height) // 2
+            # y = 主器件y + (主器件高度 - 子器件总长度)/2（垂直居中）
+            y = main_y + (main_height - total_length) // 2
+            y = max(1, y)
             return x, y
 
         elif edge == "top":
+            # 水平排列（上方）：y = 主器件上边界 + 间距
             y = main_y + main_height + margin
-            total_width = num_sub_comps * sub_width + (num_sub_comps - 1) * 2
-            x = main_x + (main_width - total_width) // 2
+            # x = 主器件x + (主器件宽度 - 子器件总长度)/2（水平居中）
+            x = main_x + (main_width - total_length) // 2
+            x = max(1, x)  # 确保不超出PCB左边界
             return x, y
 
-        else:  # bottom
-            y = main_y - sub_height - margin
-            total_width = num_sub_comps * sub_width + (num_sub_comps - 1) * 2
-            x = main_x + (main_width - total_width) // 2
+        else:  # bottom（下方）
+            # 水平排列（下方）：y = 主器件下边界 - 间距 - 最大子器件高度
+            y = main_y - margin - max_dim
+            # x = 主器件x + (主器件宽度 - 子器件总长度)/2（水平居中）
+            x = main_x + (main_width - total_length) // 2
+            x = max(1, x)
             return x, y
 
     def _is_inside_pcb(self, x, y, width, height):
-        """检查子器件是否在PCB范围内"""
+        """检查子器件是否完全在PCB范围内（含边界预留）"""
         return (x >= 1 and
                 y >= 1 and
                 x + width <= self.pcb_size[0] - 1 and
                 y + height <= self.pcb_size[1] - 1)
 
     def _find_nearby_position(self, x, y, width, height, max_attempts=30):
-        """扩大搜索范围，确保找到合适的子器件位置"""
-        # 螺旋式搜索，先近后远
+        """螺旋式搜索附近可用位置（适配随机子器件大小）"""
         for layer in range(1, max_attempts + 1):
-            # 右移
+            # 右移搜索
             for dx in range(layer):
                 new_x = x + dx + 1
                 new_y = y + layer
                 if self._is_valid_position(new_x, new_y, width, height):
                     return new_x, new_y
-            # 上移
+            # 上移搜索
             for dy in range(layer):
                 new_x = x + layer
                 new_y = y + layer - dy - 1
                 if self._is_valid_position(new_x, new_y, width, height):
                     return new_x, new_y
-            # 左移
+            # 左移搜索
             for dx in range(layer):
                 new_x = x + layer - dx - 1
                 new_y = y - 1
                 if self._is_valid_position(new_x, new_y, width, height):
                     return new_x, new_y
-            # 下移
+            # 下移搜索
             for dy in range(layer):
                 new_x = x - 1
                 new_y = y - 1 + dy + 1
                 if self._is_valid_position(new_x, new_y, width, height):
                     return new_x, new_y
-
         return None, None
 
     def _is_valid_position(self, x, y, width, height):
-        """检查位置是否有效，包括周围布线空间"""
+        """检查位置是否有效（不重叠+在PCB内）"""
         if not self._is_inside_pcb(x, y, width, height):
             return False
-
+        # 检查子器件本体是否与已占据网格重叠
         for dx in range(x, x + width + 1):
             for dy in range(y, y + height + 1):
                 if (dx, dy) in self.occupied_grid:
@@ -379,32 +412,29 @@ class PCBGenerator:
         return True
 
     def _generate_sub_comp_pin(self, edge, x, y, width, height):
-        """严格按照指定范围生成子器件pin脚"""
+        """基于子器件实际大小和边的位置生成pin脚（严格限定范围）"""
         if edge == "left":
-            # 范围2：x = 器件右边界-1，y ∈ [下边界+1, 上边界]
+            # 左側子器件：pin脚在右边界（x = x+width-1），y ∈ [y+1, y+height]
             pin_x = x + width - 1
             pin_y = random.randint(y + 1, y + height)
-
         elif edge == "right":
-            # 范围4：x = 器件左边界，y ∈ [下边界+1, 上边界]
+            # 右側子器件：pin脚在左边界（x = x），y ∈ [y+1, y+height]
             pin_x = x
             pin_y = random.randint(y + 1, y + height)
-
         elif edge == "top":
-            # 范围1：x ∈ [左边界, 右边界-1], y = 下边界+1
+            # 上側子器件：pin脚在下边界（y = y+1），x ∈ [x, x+width-1]
             pin_y = y + 1
             pin_x = random.randint(x, x + width - 1)
-
-        else:  # bottom
-            # 范围3：x ∈ [左边界, 右边界-1], y = 上边界
+        else:  # bottom（下側）
+            # 下側子器件：pin脚在上边界（y = y+height），x ∈ [x, x+width-1]
             pin_y = y + height
             pin_x = random.randint(x, x + width - 1)
 
-        # 确保pin脚位置有效
+        # 确保pin脚不重复
         if (pin_x, pin_y) not in self.pin_positions:
             return (pin_x, pin_y)
 
-        # 在同一范围内尝试其他位置
+        # 尝试同一范围内的其他位置（最多10次）
         attempts = 0
         max_attempts = 10
         while attempts < max_attempts:
@@ -415,14 +445,12 @@ class PCBGenerator:
             else:
                 new_pin_x = random.randint(x, x + width - 1)
                 new_pin_y = pin_y
-
             if (new_pin_x, new_pin_y) not in self.pin_positions:
                 return (new_pin_x, new_pin_y)
-
         return None
 
     def define_net_connections(self):
-        """定义网络连接关系"""
+        """定义网络连接关系（主器件pin脚与对应子器件pin脚连接）"""
         net_info = {}
         for i in range(1, self.num_sub_comps + 1):
             net_info[f"net{i}"] = {
@@ -432,38 +460,38 @@ class PCBGenerator:
         return net_info
 
     def a_star_algorithm(self, start, end):
-        """增强版A*算法，提高路径搜索能力"""
-        # 四方向优先，减少路径复杂度
+        """增强版A*算法（适配随机子器件大小的布线）"""
+        # 四方向优先（减少路径复杂度），八方向备用
         directions = [(0, 1), (1, 0), (0, -1), (-1, 0),
                       (-1, -1), (-1, 1), (1, -1), (1, 1)]
 
-        # 使用曼哈顿距离作为启发函数，更适合网格布线
+        # 曼哈顿距离启发函数（适合网格布线）
         def heuristic(node, goal):
             return abs(node[0] - goal[0]) + abs(node[1] - goal[1])
 
-        # 初始化开放列表和关闭列表
+        # 初始化优先队列和路径记录
         open_heap = []
         heapq.heappush(open_heap, (0, start))
-
         came_from = {start: None}
         g_score = {start: 0}
         f_score = {start: heuristic(start, end)}
 
-        # 大幅增加最大迭代次数
-        max_iterations = 50000
+        max_iterations = 50000  # 增加迭代上限，适配复杂布局
         iteration = 0
 
         while open_heap and iteration < max_iterations:
             iteration += 1
             _, current = heapq.heappop(open_heap)
 
+            # 到达终点，回溯路径
             if current == end:
                 path = []
                 while current:
                     path.append(current)
                     current = came_from[current]
-                return path[::-1]
+                return path[::-1]  # 反转路径（从起点到终点）
 
+            # 探索邻居节点
             for dx, dy in directions:
                 neighbor = (current[0] + dx, current[1] + dy)
 
@@ -472,30 +500,30 @@ class PCBGenerator:
                         neighbor[1] < 0 or neighbor[1] >= self.pcb_size[1]):
                     continue
 
-                # 允许布线靠近但不重叠器件
+                # 允许布线靠近pin脚（但不重叠器件本体）
                 if (neighbor in self.occupied_grid and
                         neighbor != start and neighbor != end and
                         not self._is_adjacent_to_pin(neighbor)):
                     continue
 
-                # 计算移动成本，优先直线移动
+                # 计算移动成本（直线1.0，斜线1.414，靠近布线增加成本）
                 move_cost = 1.414 if dx != 0 and dy != 0 else 1.0
-                # 对靠近其他布线的路径增加少量成本，鼓励分散布线
                 if neighbor in self.wire_paths:
-                    move_cost += 0.5
+                    move_cost += 0.5  # 避免布线过度重叠
 
                 tentative_g_score = g_score[current] + move_cost
 
+                # 更新更优路径
                 if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
                     came_from[neighbor] = current
                     g_score[neighbor] = tentative_g_score
                     f_score[neighbor] = g_score[neighbor] + heuristic(neighbor, end)
                     heapq.heappush(open_heap, (f_score[neighbor], neighbor))
 
-        return None
+        return None  # 路径搜索失败（后续有 fallback 逻辑）
 
     def _is_adjacent_to_pin(self, position):
-        """检查位置是否靠近pin脚，允许布线靠近pin脚"""
+        """检查位置是否靠近pin脚（允许布线靠近pin脚）"""
         x, y = position
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
@@ -504,81 +532,74 @@ class PCBGenerator:
         return False
 
     def generate_wiring(self, net_info, comp_info):
-        """改进布线策略，确保所有网络都能布线"""
+        """改进布线策略（适配随机子器件大小，确保100%布线成功率）"""
         wire_paths = {}
         main_comp = comp_info["main_component"]
         main_x, main_y = main_comp["bottom_left_position"]
 
-        # 按边分组布线，避免交叉干扰
+        # 按边分组布线（减少不同边网络的交叉干扰）
         edge_nets = {
             "left": [], "right": [], "top": [], "bottom": []
         }
-
-        # 先按边分组网络
         for net_name, connections in net_info.items():
             main_pin_name = connections["main_component"]
             edge = main_comp["pin_edges"][main_pin_name]
             edge_nets[edge].append((net_name, connections))
 
-        # 按边顺序布线，减少不同边网络之间的干扰
+        # 按边顺序布线（左→右→上→下）
         for edge in ["left", "right", "top", "bottom"]:
             for net_name, connections in edge_nets[edge]:
+                # 获取主器件和子器件的pin脚绝对坐标
                 main_pin_name = connections["main_component"]
                 sub_comp_name = [name for name in connections if name.startswith("sub_component")][0]
                 sub_pin_name = connections[sub_comp_name]
 
                 sub_comp = comp_info[sub_comp_name]
                 sub_x, sub_y = sub_comp["bottom_left_position"]
+                sub_w, sub_h = sub_comp["contour_size"]  # 使用随机生成的子器件大小
 
                 # 计算pin脚绝对位置
                 main_pin_rel = main_comp["pins"][main_pin_name]
                 main_pin_abs = (main_x + main_pin_rel[0], main_y + main_pin_rel[1])
-
                 sub_pin_rel = sub_comp["pins"][sub_pin_name]
                 sub_pin_abs = (sub_x + sub_pin_rel[0], sub_y + sub_pin_rel[1])
 
-                # 多次尝试布线，确保成功
+                # 多次尝试布线（最多10次）
                 path = None
                 attempts = 0
-                max_wire_attempts = 10  # 大幅增加尝试次数
-
-                # 保存当前布线状态，用于重试
-                current_wire_paths = self.wire_paths.copy()
+                max_wire_attempts = 10
+                current_wire_paths = self.wire_paths.copy()  # 保存当前布线状态
 
                 while path is None and attempts < max_wire_attempts:
                     attempts += 1
-                    # 每次尝试前恢复初始状态
-                    self.wire_paths = current_wire_paths.copy()
-
+                    self.wire_paths = current_wire_paths.copy()  # 恢复初始状态
                     path = self.a_star_algorithm(main_pin_abs, sub_pin_abs)
 
-                    # 如果失败，尝试临时放宽障碍限制
-                    if path is None:
-                        # 最后几次尝试允许布线更靠近器件
+                    # 最后几次尝试放宽障碍限制（允许靠近器件）
+                    if path is None and attempts >= max_wire_attempts // 2:
                         self.occupied_grid = self.occupied_grid - self._get_near_pin_positions()
 
+                # 仍失败时，使用 fallback 策略（强制布线）
+                if path is None:
+                    print(f"Using fallback routing for {net_name}")
+                    self.occupied_grid = self.occupied_grid - self._get_near_pin_positions()
+                    path = self.a_star_algorithm(main_pin_abs, sub_pin_abs)
+
+                # 终极 fallback：直线连接
+                if path is None:
+                    print(f"Using direct line for {net_name}")
+                    path = self._direct_line_fallback(main_pin_abs, sub_pin_abs)
+
+                # 记录布线路径
                 if path:
                     for point in path:
                         self.wire_paths.add(point)
                     wire_paths[net_name] = path
-                else:
-                    # 终极方案：强制布线，即使需要靠近器件
-                    print(f"Using fallback routing for {net_name}")
-                    self.occupied_grid = self.occupied_grid - self._get_near_pin_positions()
-                    path = self.a_star_algorithm(main_pin_abs, sub_pin_abs)
-                    if path:
-                        for point in path:
-                            self.wire_paths.add(point)
-                        wire_paths[net_name] = path
-                    else:
-                        # 实在不行就用直线连接（作为最后的补救）
-                        print(f"Using direct line for {net_name}")
-                        wire_paths[net_name] = self._direct_line_fallback(main_pin_abs, sub_pin_abs)
 
         return wire_paths
 
     def _get_near_pin_positions(self):
-        """获取pin脚附近的位置，允许布线通过"""
+        """获取pin脚附近区域（允许布线通过）"""
         near_pins = set()
         for (x, y) in self.pin_positions:
             for dx in [-2, -1, 0, 1, 2]:
@@ -587,12 +608,12 @@ class PCBGenerator:
         return near_pins
 
     def _direct_line_fallback(self, start, end):
-        """直线连接作为最后的布线方案"""
+        """直线连接作为最后的布线方案（适配随机子器件大小）"""
         path = []
         x0, y0 = start
         x1, y1 = end
 
-        # 生成直线上的点
+        #  Bresenham 直线算法（生成直线上的所有点）
         dx = abs(x1 - x0)
         dy = abs(y1 - y0)
         sx = 1 if x1 > x0 else -1
@@ -611,47 +632,45 @@ class PCBGenerator:
                 err += dx
                 y0 += sy
 
-        # 强制添加这些点到布线，即使它们靠近器件
+        # 强制添加布线（即使靠近器件）
         for point in path:
             self.wire_paths.add(point)
-            # 从占据网格中移除，允许通过
             if point in self.occupied_grid:
                 self.occupied_grid.remove(point)
 
         return path
 
     def generate_pcb(self):
-        """生成完整的PCB数据，确保100%布线成功率"""
-        # 重置状态
+        """生成完整的PCB数据（适配随机子器件大小，确保100%布线成功率）"""
+        # 重置状态（避免多次生成时的状态污染）
         self.occupied_grid = set()
         self.wire_paths = set()
         self.pin_positions = set()
         self.pin_edges = {}
 
-        # 1. 生成主器件
+        # 1. 生成主器件（原逻辑保留）
         main_comp = self.generate_main_component()
 
-        # 2. 生成子器件
+        # 2. 生成子器件（核心改动：子器件大小随机）
         sub_comps = self.generate_sub_components(main_comp)
 
-        # 整合所有器件信息
+        # 3. 整合器件信息
         comp_info = {"main_component": main_comp}
         for sub_comp in sub_comps:
             comp_info.update(sub_comp)
 
-        # 定义网络连接关系
+        # 4. 定义网络连接
         net_info = self.define_net_connections()
 
-        # 3. 进行布线，确保所有网络都能连接
+        # 5. 布线（适配随机子器件布局）
         wire_paths = self.generate_wiring(net_info, comp_info)
 
-        # 验证所有网络都已布线
+        # 6. 验证布线完整性（失败则重试）
         if len(wire_paths) < len(net_info):
-            missing = len(net_info) - len(wire_paths)
-            # 如果有网络未布线，重试一次
+            print(f"Retrying PCB generation (missing {len(net_info)-len(wire_paths)} wires)")
             return self.generate_pcb()
 
-        # 组织成最终的数据结构
+        # 7. 组织最终数据结构
         self.pcb_data = {
             "pcb1": {
                 "component_info": comp_info,
@@ -663,24 +682,23 @@ class PCBGenerator:
         return self.pcb_data
 
     def save_to_json(self, folder_path, filename=None):
-        """将PCB数据保存到指定文件夹的JSON文件"""
+        """将PCB数据保存到JSON文件（适配随机子器件大小的序列化）"""
         if not self.pcb_data:
-            print("请先生成PCB数据")
+            print("请先生成PCB数据（调用 generate_pcb() 方法）")
             return
 
         # 确保文件夹存在
         os.makedirs(folder_path, exist_ok=True)
 
+        # 生成唯一文件名（时间戳+随机数）
         if not filename:
-            # 生成带时间戳和随机数的文件名，确保唯一性
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             random_suffix = random.randint(1000, 9999)
             filename = f"pcb_layout_{timestamp}_{random_suffix}.json"
 
-        # 完整文件路径
         full_path = os.path.join(folder_path, filename)
 
-        # 自定义编码器处理集合和元组
+        # 自定义JSON编码器（处理集合和元组）
         class CustomEncoder(json.JSONEncoder):
             def default(self, obj):
                 if isinstance(obj, set):
@@ -689,100 +707,106 @@ class PCBGenerator:
                     return list(obj)
                 return json.JSONEncoder.default(self, obj)
 
+        # 保存数据
         with open(full_path, 'w', encoding='utf-8') as f:
             json.dump(self.pcb_data, f, ensure_ascii=False, indent=2, cls=CustomEncoder)
 
         return full_path
 
-    def visualize(self, title="PCB布局和布线图"):
-        """可视化PCB布局和布线"""
+    def visualize(self, title="PCB Layout and Wiring Diagram"):
+        """可视化PCB布局（适配随机子器件大小的显示）"""
         if not self.pcb_data:
-            print("请先生成PCB数据")
+            print("请先生成PCB数据（调用 generate_pcb() 方法）")
             return
 
         fig, ax = plt.subplots(figsize=(10, 10))
 
-        # 绘制PCB边界
+        # 1. 绘制PCB边界
         ax.add_patch(Rectangle((0, 0), self.pcb_size[0], self.pcb_size[1],
                                fill=False, edgecolor='black', linewidth=2))
 
-        # 获取器件和布线信息
+        # 2. 获取数据
         comp_info = self.pcb_data["pcb1"]["component_info"]
         net_info = self.pcb_data["pcb1"]["net_info"]
         wire_paths = self.pcb_data["pcb1"]["wire_paths"]
 
-        # 绘制主器件
+        # 3. 绘制主器件
         main_comp = comp_info["main_component"]
         main_x, main_y = main_comp["bottom_left_position"]
-        main_width, main_height = main_comp["contour_size"]
-        ax.add_patch(Rectangle((main_x, main_y), main_width, main_height,
+        main_w, main_h = main_comp["contour_size"]
+        ax.add_patch(Rectangle((main_x, main_y), main_w, main_h,
                                fill=True, edgecolor='blue', facecolor='lightblue', alpha=0.7))
-        ax.text(main_x + main_width / 2, main_y + main_height / 2, "Main",
-                ha='center', va='center', fontsize=10)
+        ax.text(main_x + main_w/2, main_y + main_h/2, "Main",
+                ha='center', va='center', fontsize=10, fontweight='bold')
 
-        # 绘制主器件pin脚
+        # 4. 绘制主器件pin脚
         for pin_name, rel_pos in main_comp["pins"].items():
             pin_x = main_x + rel_pos[0]
             pin_y = main_y + rel_pos[1]
-            ax.plot(pin_x, pin_y, 'bo', markersize=6)
+            ax.plot(pin_x, pin_y, 'bo', markersize=6, label="Main Pin" if "Main Pin" not in ax.get_legend_handles_labels()[1] else "")
             ax.text(pin_x + 0.3, pin_y + 0.3, pin_name, fontsize=7)
 
-        # 绘制子器件
+        # 5. 绘制子器件（适配随机大小）
         sub_comp_names = [name for name in comp_info if name.startswith("sub_component")]
-        colors = plt.cm.Set3(np.linspace(0, 1, len(sub_comp_names)))
+        colors = plt.cm.Set3(np.linspace(0, 1, len(sub_comp_names)))  # 随机颜色
 
         for i, sub_name in enumerate(sub_comp_names):
             sub_comp = comp_info[sub_name]
             sub_x, sub_y = sub_comp["bottom_left_position"]
-            sub_width, sub_height = sub_comp["contour_size"]
-            ax.add_patch(Rectangle((sub_x, sub_y), sub_width, sub_height,
+            sub_w, sub_h = sub_comp["contour_size"]  # 使用随机生成的大小
+            # 绘制子器件矩形
+            ax.add_patch(Rectangle((sub_x, sub_y), sub_w, sub_h,
                                    fill=True, edgecolor='green', facecolor=colors[i], alpha=0.7))
-            ax.text(sub_x + sub_width / 2, sub_y + sub_height / 2, f"S{i + 1}",
-                    ha='center', va='center', fontsize=8)
+            # 添加子器件标签（显示编号）
+            ax.text(sub_x + sub_w/2, sub_y + sub_h/2, f"S{i+1}",
+                    ha='center', va='center', fontsize=8, fontweight='bold')
 
             # 绘制子器件pin脚
             for pin_name, rel_pos in sub_comp["pins"].items():
                 pin_x = sub_x + rel_pos[0]
                 pin_y = sub_y + rel_pos[1]
-                ax.plot(pin_x, pin_y, 'go', markersize=6)
+                ax.plot(pin_x, pin_y, 'go', markersize=6, label="Sub Pin" if "Sub Pin" not in ax.get_legend_handles_labels()[1] else "")
                 ax.text(pin_x + 0.3, pin_y + 0.3, pin_name, fontsize=7)
 
-        # 绘制布线
+        # 6. 绘制布线（每条网络不同颜色）
         wire_colors = plt.cm.tab10(np.linspace(0, 1, len(wire_paths)))
         for idx, (net_name, path) in enumerate(wire_paths.items()):
             if path and len(path) > 1:
                 x_values = [p[0] for p in path]
                 y_values = [p[1] for p in path]
                 ax.plot(x_values, y_values, '-', color=wire_colors[idx], linewidth=1.5,
-                        label=f"{net_name}")
+                        label=f"{net_name}" if idx < 10 else "")  # 限制图例数量
 
-        # 设置坐标轴
+        # 7. 设置坐标轴和图例
         ax.set_xlim(-1, self.pcb_size[0] + 1)
         ax.set_ylim(-1, self.pcb_size[1] + 1)
         ax.set_aspect('equal')
-        ax.grid(True)
-        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_xlabel("X (Grid)", fontsize=12)
+        ax.set_ylabel("Y (Grid)", fontsize=12)
 
-        # 显示网格点
+        # 显示网格刻度
         ax.set_xticks(range(self.pcb_size[0] + 1))
         ax.set_yticks(range(self.pcb_size[1] + 1))
 
-        # 添加图例
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        # 调整图例位置
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
 
         plt.tight_layout()
         return fig
 
     def load_from_json(self, filename):
-        """从JSON文件加载PCB数据"""
+        """从JSON文件加载PCB数据（适配随机子器件大小的恢复）"""
         if not os.path.exists(filename):
             print(f"文件 {filename} 不存在")
             return
 
+        # 加载数据
         with open(filename, 'r', encoding='utf-8') as f:
             self.pcb_data = json.load(f)
 
-        # 恢复状态
+        # 恢复状态（占据网格、pin脚、布线）
         self.occupied_grid = set()
         self.wire_paths = set()
         self.pin_positions = set()
@@ -790,12 +814,14 @@ class PCBGenerator:
         comp_info = self.pcb_data["pcb1"]["component_info"]
         for comp_name, comp_data in comp_info.items():
             x, y = comp_data["bottom_left_position"]
-            width, height = comp_data["contour_size"]
+            width, height = comp_data["contour_size"]  # 恢复随机生成的大小
 
+            # 记录器件占据的网格
             for dx in range(width + 1):
                 for dy in range(height + 1):
                     self.occupied_grid.add((x + dx, y + dy))
 
+            # 记录pin脚位置（从占据网格中移除）
             for pin_rel in comp_data["pins"].values():
                 pin_x = x + pin_rel[0]
                 pin_y = y + pin_rel[1]
@@ -803,6 +829,7 @@ class PCBGenerator:
                 if (pin_x, pin_y) in self.occupied_grid:
                     self.occupied_grid.remove((pin_x, pin_y))
 
+        # 恢复布线位置
         wire_paths = self.pcb_data["pcb1"]["wire_paths"]
         for path in wire_paths.values():
             for point in path:
@@ -954,21 +981,22 @@ def generate_multiple_datasets(num_datasets=10, output_folder="datasets",
         os.makedirs(test_dir)
         os.makedirs(temp_dir)
 
-    # 3. 创建PCB生成器实例
-    pcb_gen = PCBGenerator(
-        pcb_size=(30, 30),
-        main_comp_min_size=(8, 8),
-        main_comp_max_size=(10, 10),
-        sub_comp_size=(2, 1),
-        num_sub_comps=10
-    )
-
     # 4. 生成所有数据集到临时目录
     print(f"\n开始生成 {num_datasets} 个PCB数据集（临时目录: {temp_dir}）...")
 
     pbar = tqdm(range(num_datasets))  # 创建进度条
     pbar.set_description("正在生成数据...")
     for i in pbar:
+        # 创建PCB生成器实例
+        pcb_gen = PCBGenerator(
+            pcb_size=(30, 30),
+            main_max_comp_size=(14, 14),
+            main_min_comp_size=(8, 8),
+            sub_max_comp_size=(4, 4),
+            sub_min_comp_size=(1, 1),
+            num_sub_comps=random.randint(8, 8)
+        )
+
         # 生成PCB数据
         pcb_data = pcb_gen.generate_pcb()
         # 保存到临时目录
@@ -1031,10 +1059,10 @@ if __name__ == "__main__":
 
     # 步骤2：生成50个数据集，按9:1划分到datasets/train_data和datasets/test_data
     generate_multiple_datasets(
-        num_datasets=100000,  # 总数据集数量（50个→训练集45个，测试集5个）
+        num_datasets=10000,  # 总数据集数量（50个→训练集45个，测试集5个）
         output_folder="datasets",  # 根目录
         visualize_all=False,  # 不可视化所有
-        visualize_samples=True,  # 不可视化样本（快速生成）
+        visualize_samples=False,  # 不可视化样本（快速生成）
         sample_count=2,  # 若开启可视化，显示2个样本
         split_ratio=0.9
     )
