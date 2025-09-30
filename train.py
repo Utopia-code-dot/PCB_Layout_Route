@@ -4,24 +4,27 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
+import matplotlib
+matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
+import numpy as np
 
 from config import config
-from model import DecoderOnlyTransformer
+from model import GPTModel
 from PCBTokenizer import PCBTokenizer, PCBDataset
 
 
 # 训练函数（包含Token正确率统计）
-def train_model(model, train_loader, criterion, optimizer, device, pad_token):
+def train_model(model, train_loader, criterion, optimizer, scheduler, device, pad_token):
     """训练一个epoch，返回平均损失和Token正确率"""
     model.train()
     total_loss = 0.0
     total_correct = 0  # 统计正确的Token数
-    total_valid_tokens = 0  # 统计有效Token数（排除PAD）
+    total_tokens = 0  # 统计有效Token数（排除PAD）
 
     for batch in tqdm(train_loader, desc="Training"):
         tokens = batch["tokens"].to(device)
-
+        print(tokens[0])
         # 前n-1个token作为输入，后n-1个token作为目标
         input_tokens = tokens[:, :-1]
         target_tokens = tokens[:, 1:]
@@ -29,34 +32,44 @@ def train_model(model, train_loader, criterion, optimizer, device, pad_token):
         # 清零梯度
         optimizer.zero_grad()
 
-        # 生成目标掩码（防止模型看到未来token）
-        tgt_len = input_tokens.size(1)
-        tgt_mask = model._generate_square_subsequent_mask(tgt_len).to(device)
+        # 通过模型计算输出
+        logits = model(input_tokens)
+        logits = logits.reshape(-1, logits.size(-1))
+        preds = logits.argmax(dim=-1)
 
-        # 前向传播
-        output = model(input_tokens, tgt_mask=tgt_mask)  # (batch_size, seq_len-1, vocab_size)
+        # 处理标签便于计算损失
+        target_tokens = target_tokens.reshape(-1)
+        seq_length = tokens.size(1) - 1
 
-        # 1. 计算损失（忽略<PAD>标记）
-        loss = criterion(output.transpose(1, 2), target_tokens)  # (batch_size, seq_len-1)
-        mask = (target_tokens != pad_token).float()  # (batch_size, seq_len-1)：PAD位置为0，有效位置为1
-        loss = (loss * mask).sum() / mask.sum()  # 加权平均损失
+        # 掩码机制
+        cond_len = find_cond_length(tokens[0, :])
+        mask_indices = torch.arange(seq_length, device=device) >= (cond_len - 1)
+        mask_indices = mask_indices.unsqueeze(0).expand(tokens.size(0), -1).reshape(-1)
+        loss_mask = mask_indices.bool() & (target_tokens != pad_token)
+        logits_masked = logits[loss_mask]
+        target_masked = target_tokens[loss_mask]
 
-        # 2. 计算Token正确率（仅统计有效Token）
-        pred_tokens = torch.argmax(output, dim=-1)  # (batch_size, seq_len-1)：取概率最大的Token
-        correct = (pred_tokens == target_tokens) & (target_tokens != pad_token)  # 正确且非PAD的位置
-        total_correct += correct.sum().item()  # 累加正确数
-        total_valid_tokens += mask.sum().item()  # 累加有效Token数
-
-        # 反向传播和优化
+        # 计算损失
+        loss = criterion(logits_masked, target_masked)
         loss.backward()
+
+        # 梯度裁剪防止梯度爆炸
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+        # 梯度更新
         optimizer.step()
 
-        total_loss += loss.item()
+        # 计算正确率
+        with torch.no_grad():
+            total_loss += loss.item()
+            acc_mask = (target_tokens != pad_token) & mask_indices
+            total_correct += (preds[acc_mask] == target_tokens[acc_mask]).float().sum().item()
+            total_tokens += acc_mask.sum().item()
 
-    # 计算平均损失和正确率
+    scheduler.step()
     avg_loss = total_loss / len(train_loader)
-    accuracy = (total_correct / total_valid_tokens) * 100 if total_valid_tokens > 0 else 0.0
-    return avg_loss, accuracy
+    epoch_acc = total_correct / total_tokens * 100 if total_tokens > 0 else 0.0  # 转换为百分比
+    return avg_loss, epoch_acc
 
 
 # 验证函数（包含Token正确率统计）
@@ -65,7 +78,7 @@ def validate_model(model, val_loader, criterion, device, pad_token):
     model.eval()
     total_loss = 0.0
     total_correct = 0  # 统计正确的Token数
-    total_valid_tokens = 0  # 统计有效Token数（排除PAD）
+    total_tokens = 0  # 统计有效Token数（排除PAD）
 
     with torch.no_grad():  # 禁用梯度计算，加快验证速度并避免内存占用
         for batch in tqdm(val_loader, desc="Validation"):
@@ -75,99 +88,76 @@ def validate_model(model, val_loader, criterion, device, pad_token):
             input_tokens = tokens[:, :-1]
             target_tokens = tokens[:, 1:]
 
-            # 生成目标掩码
-            tgt_len = input_tokens.size(1)
-            tgt_mask = model._generate_square_subsequent_mask(tgt_len).to(device)
+            # 通过模型计算输出
+            logits = model(input_tokens)
+            logits = logits.reshape(-1, logits.size(-1))
+            preds = logits.argmax(dim=-1)
 
-            # 前向传播
-            output = model(input_tokens, tgt_mask=tgt_mask)  # (batch_size, seq_len-1, vocab_size)
+            # 处理标签便于计算损失
+            target_tokens = target_tokens.reshape(-1)
+            seq_length = tokens.size(1) - 1
 
-            # 1. 计算损失（忽略<PAD>）
-            loss = criterion(output.transpose(1, 2), target_tokens)
-            mask = (target_tokens != pad_token).float()
-            loss = (loss * mask).sum() / mask.sum()
+            # 掩码机制
+            cond_len = find_cond_length(tokens[0, :])
+            mask_indices = torch.arange(seq_length, device=device) >= (cond_len - 1)
+            mask_indices = mask_indices.unsqueeze(0).expand(tokens.size(0), -1).reshape(-1)
+            loss_mask = mask_indices.bool() & (target_tokens != pad_token)
+            logits_masked = logits[loss_mask]
+            target_masked = target_tokens[loss_mask]
 
-            # 2. 计算Token正确率（仅统计有效Token）
-            pred_tokens = torch.argmax(output, dim=-1)
-            correct = (pred_tokens == target_tokens) & (target_tokens != pad_token)
-            total_correct += correct.sum().item()
-            total_valid_tokens += mask.sum().item()
+            # 计算损失
+            loss = criterion(logits_masked, target_masked)
 
             total_loss += loss.item()
+            acc_mask = (target_tokens != pad_token) & mask_indices
+            total_correct += (preds[acc_mask] == target_tokens[acc_mask]).float().sum().item()
+            total_tokens += acc_mask.sum().item()
 
     # 计算平均损失和正确率
     avg_loss = total_loss / len(val_loader)
-    accuracy = (total_correct / total_valid_tokens) * 100 if total_valid_tokens > 0 else 0.0
-    return avg_loss, accuracy
-
-# 测试函数
-def predict_route(model, tokenizer, prompt_tokens, max_length, device):
-    """
-    预测PCB布线信息（从<SOS>到<SODPS>为提示，生成后续布线token）
-    """
-    model.eval()
-
-    # 将提示移到设备上
-    prompt = prompt_tokens.to(device)
-
-    # 生成预测（使用预划分的编码表特殊标记）
-    generated = model.generate(
-        prompt,
-        max_length=max_length,
-        pad_token=tokenizer.special_tokens["<PAD>"],
-        eos_token=tokenizer.special_tokens["<EOS>"]
-    )
-
-    return generated.cpu()  # 转回CPU以便后续处理
+    epoch_acc = total_correct / total_tokens * 100 if total_tokens > 0 else 0.0  # 转换为百分比
+    return avg_loss, epoch_acc
 
 
-def test_model(model, test_loader, criterion, device, pad_token):
+def test_model(model, prompt_tokens, sample_tokens, device, max_gen_len, mask=False):
     """测试模型，返回平均损失和Token正确率"""
     model.eval()
-    total_loss = 0.0
-    total_correct = 0  # 统计正确的Token数
-    total_valid_tokens = 0  # 统计有效Token数（排除PAD）
+    output = prompt_tokens.copy()
 
     with torch.no_grad():  # 禁用梯度计算
-        for batch in tqdm(test_loader, desc="Testing"):
-            tokens = batch["tokens"].to(device)
+        for i in range(max_gen_len):
+            # 预测下一个token
+            inp = output
+            logits = model(inp)
+            next_token = int(torch.argmax(logits[0, -1, :]).item())
 
-            # 前n-1个token作为输入，后n-1个token作为目标
-            input_tokens = tokens[:, :-1]
-            target_tokens = tokens[:, 1:]
+            if mask:
+                if len(prompt_tokens) + i < len(sample_tokens):
+                    label_token = sample_tokens[len(prompt_tokens) + i]  # 该位置的label
+                    if label_token == 11:
+                        next_token = label_token
 
-            # 生成目标掩码
-            tgt_len = input_tokens.size(1)
-            tgt_mask = model._generate_square_subsequent_mask(tgt_len).to(device)
+            output = torch.cat((output, torch.tensor([[next_token]]).to(device)), dim=1)
 
-            # 前向传播
-            output = model(input_tokens, tgt_mask=tgt_mask)
+    return output
 
-            # 计算损失（忽略<PAD>）
-            loss = criterion(output.transpose(1, 2), target_tokens)
-            mask = (target_tokens != pad_token).float()
-            loss = (loss * mask).sum() / mask.sum()
 
-            # 计算Token正确率
-            pred_tokens = torch.argmax(output, dim=-1)
-            correct = (pred_tokens == target_tokens) & (target_tokens != pad_token)
-            total_correct += correct.sum().item()
-            total_valid_tokens += mask.sum().item()
-
-            total_loss += loss.item()
-
-    # 计算平均损失和正确率
-    avg_loss = total_loss / len(test_loader)
-    accuracy = (total_correct / total_valid_tokens) * 100 if total_valid_tokens > 0 else 0.0
-    return avg_loss, accuracy
+def find_cond_length(tokens):
+    cnt = 0
+    for token in tokens:
+        if token == 7:
+            return cnt + 1
+        else:
+            cnt += 1
+    return -1
 
 
 def find_token_position(tokens, token_value):
     """找到特定token在序列中的第一个出现位置（用于提取预测提示）"""
-    positions = (tokens == token_value).nonzero()
-    if positions.numel() == 0:
+    try:
+        return tokens.tolist().index(token_value)  # 返回第一个匹配位置（按batch第一个样本）
+    except:
         return -1  # 未找到目标token
-    return positions[0, 1].item()  # 返回第一个匹配位置（按batch第一个样本）
 
 
 def train(train_flag=True):
@@ -187,7 +177,7 @@ def train(train_flag=True):
     print(f"使用设备: {config['device']}")
     print(f"序列最大长度: {config['max_length']} | 批次大小: {config['batch_size']}")
 
-    # -------------------------- 1. 初始化Tokenizer --------------------------
+    # -------------------------- 初始化Tokenizer --------------------------
     try:
         tokenizer = PCBTokenizer(encode_table_path=config["encode_table_path"])
         print(f"\n成功加载编码表，词汇表大小: {len(tokenizer.encode_table)}")
@@ -195,23 +185,15 @@ def train(train_flag=True):
         print(f"\n初始化Tokenizer失败: {str(e)}")
         return
 
-    # -------------------------- 2. 加载训练数据并划分训练集和验证集 --------------------------
+    # -------------------------- 加载训练数据并划分训练集和验证集 --------------------------
     try:
         # 加载完整训练数据
-        full_train_dataset = PCBDataset(
-            data_dir=config["train_dir"],
-            tokenizer=tokenizer,
-            max_length=config["max_length"]
-        )
+        full_train_dataset = PCBDataset(data_dir=config["train_dir"], tokenizer=tokenizer, max_length=config["max_length"])
 
         # 划分训练集和验证集
         val_size = int(0.1 * len(full_train_dataset))
         train_size = len(full_train_dataset) - val_size
-        train_dataset, val_dataset = random_split(
-            full_train_dataset,
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(42)  # 固定随机种子，确保划分一致
-        )
+        train_dataset, val_dataset = random_split(full_train_dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42))  # 固定随机种子，确保划分一致
 
         print(f"\n成功加载并划分训练数据:")
         print(f"  总训练样本数: {len(full_train_dataset)} | 训练集: {len(train_dataset)} | 验证集: {len(val_dataset)}")
@@ -219,35 +201,14 @@ def train(train_flag=True):
         print(f"\n加载训练数据失败: {str(e)}")
         return
 
-    # -------------------------- 3. 创建DataLoader --------------------------
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config["batch_size"],
-        shuffle=True,  # 训练集打乱以保证泛化性
-        num_workers=4,
-        pin_memory=True
-    )
+    # -------------------------- 创建DataLoader --------------------------
+    train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=config["batch_size"], shuffle=False, num_workers=4, pin_memory=True)
 
-    # 创建验证集DataLoader
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config["batch_size"],
-        shuffle=False,  # 验证集不打乱
-        num_workers=4,
-        pin_memory=True
-    )
-
-    # -------------------------- 4. 创建Transformer模型 --------------------------
+    # -------------------------- 创建Transformer模型 --------------------------
     try:
         vocab_size = len(tokenizer.encode_table)
-        model = DecoderOnlyTransformer(
-            vocab_size=vocab_size,
-            d_model=config["d_model"],
-            nhead=config["nhead"],
-            num_layers=config["num_layers"],
-            dim_feedforward=config["dim_feedforward"],
-            dropout=config["dropout"]
-        ).to(config["device"])
+        model = GPTModel(vocab_size, config["d_model"], config["num_layers"], config["nhead"], config["dim_feedforward"], config["dropout"]).to(config["device"])
 
         # 计算模型参数数量
         total_params = sum(p.numel() for p in model.parameters())
@@ -257,21 +218,15 @@ def train(train_flag=True):
         print(f"\n创建模型失败: {str(e)}")
         return
 
-    # -------------------------- 5. 定义损失函数与优化器 --------------------------
-    criterion = nn.CrossEntropyLoss(reduction='none')  # 不自动归约，后续手动处理<PAD>
+    # -------------------------- 定义损失函数与优化器 --------------------------
+    criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.special_tokens["<PAD>"])
     optimizer = optim.Adam(model.parameters(), lr=config["lr"])
-    # 学习率调度器：验证损失3轮不下降则学习率减半
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        patience=3,
-        factor=0.5,
-        verbose=True
-    )
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
-    # -------------------------- 6. 训练模型（每10轮验证一次） --------------------------
+    # -------------------------- 训练模型（每10轮验证一次） --------------------------
     print(f"\n开始训练")
     best_val_loss = float('inf')  # 记录最佳验证损失
+
     # 记录每轮的损失和正确率
     train_losses = []
     train_accs = []  # 训练集Token正确率
@@ -279,66 +234,27 @@ def train(train_flag=True):
     val_accs = []  # 验证集Token正确率
     val_epochs = []  # 记录进行验证的轮次
 
-    # 创建验证数据迭代器
-    val_iter = iter(val_loader)
-
     for epoch in range(config["epochs"]):
         print(f"\n=== Epoch {epoch + 1}/{config['epochs']} ===")
 
         # 训练一轮（返回损失和正确率）
-        train_loss, train_acc = train_model(
-            model=model,
-            train_loader=train_loader,
-            criterion=criterion,
-            optimizer=optimizer,
-            device=config["device"],
-            pad_token=tokenizer.special_tokens["<PAD>"]
-        )
+        train_loss, train_acc = train_model(model, train_loader, criterion, optimizer, scheduler, config["device"], tokenizer.special_tokens["<PAD>"])
+        print(f"训练损失: {train_loss:.4f} | 训练Token正确率: {train_acc:.2f}%")
+
+        # 记录训练损失和正确率
         train_losses.append(train_loss)
         train_accs.append(train_acc)
-        print(f"训练损失: {train_loss:.4f} | 训练Token正确率: {train_acc:.2f}%")
 
         # 每10轮进行一次验证（或最后一轮）
         if (epoch + 1) % 10 == 0 or (epoch + 1) == config["epochs"]:
-            # 尝试获取下一个验证批次，如果迭代器耗尽则重新创建
-            try:
-                val_batch = next(val_iter)
-                # 创建临时验证加载器
-                temp_val_loader = DataLoader(
-                    val_dataset,
-                    batch_size=len(val_batch),
-                    shuffle=False
-                )
-                val_loss, val_acc = validate_model(
-                    model=model,
-                    val_loader=temp_val_loader,
-                    criterion=criterion,
-                    device=config["device"],
-                    pad_token=tokenizer.special_tokens["<PAD>"]
-                )
-            except StopIteration:
-                # 迭代器耗尽，重新创建
-                val_iter = iter(val_loader)
-                val_batch = next(val_iter)
-                temp_val_loader = DataLoader(
-                    val_dataset,
-                    batch_size=len(val_batch),
-                    shuffle=False
-                )
-                val_loss, val_acc = validate_model(
-                    model=model,
-                    val_loader=temp_val_loader,
-                    criterion=criterion,
-                    device=config["device"],
-                    pad_token=tokenizer.special_tokens["<PAD>"]
-                )
+            val_loss, val_acc = validate_model(model, val_loader, criterion, config["device"], tokenizer.special_tokens["<PAD>"])
+            print(f"验证损失: {val_loss:.4f} | 验证Token正确率: {val_acc:.2f}%")
 
             val_losses.append(val_loss)
             val_accs.append(val_acc)
             val_epochs.append(epoch + 1)
-            print(f"验证损失: {val_loss:.4f} | 验证Token正确率: {val_acc:.2f}%")
 
-            # 调整学习率（基于验证损失）
+            # 调整学习率
             scheduler.step(val_loss)
 
             # 保存最佳模型（仅当验证损失下降时保存）
@@ -355,35 +271,42 @@ def train(train_flag=True):
                 print(
                     f"保存最佳模型（验证损失: {best_val_loss:.4f} | 验证正确率: {val_acc:.2f}%）到 {config['save_path']}")
 
-        # 绘制并保存当前的损失和正确率曲线
-        try:
-            plt.figure(figsize=(12, 6))
-            # 绘制损失曲线
-            plt.plot(range(1, len(train_losses) + 1), train_losses, label='train loss', linewidth=2)
-            plt.plot(val_epochs, val_losses, label='val loss', linewidth=2)
+            # 绘制并保存当前的损失和正确率曲线
+            try:
+                plt.figure(figsize=(12, 6))
 
-            # 绘制正确率曲线（双Y轴）
-            ax2 = plt.gca().twinx()
-            ax2.plot(range(1, len(train_accs) + 1), train_accs, 'r--', label='train token acc', linewidth=2)
-            ax2.plot(val_epochs, val_accs, 'orange', label='val token acc', linewidth=2)
+                # 创建第一个Y轴（左侧）用于损失
+                ax1 = plt.gca()
+                # 绘制训练损失和验证损失
+                ax1.plot(range(1, len(train_losses) + 1), train_losses, 'blue', label='train loss', linewidth=2)
+                ax1.plot(val_epochs, val_losses, 'green', label='val loss', linewidth=2, marker='o')
+                ax1.set_xlabel('Epoch', fontsize=12)
+                ax1.set_ylabel('Loss', fontsize=12, color='black')
+                ax1.tick_params(axis='y', labelcolor='black')
+                ax1.grid(True, alpha=0.3)
 
-            # 坐标轴设置
-            plt.gca().set_xlabel('Epoch', fontsize=12)
-            plt.gca().set_ylabel('loss', fontsize=12, color='black')
-            ax2.set_ylabel('Token acc（%）', fontsize=12, color='red')
-            plt.gca().set_title(f'PCB Transformer loss&token loss（Epoch {epoch + 1}）', fontsize=14,
-                                fontweight='bold')
+                # 创建第二个Y轴（右侧）用于准确率
+                ax2 = ax1.twinx()
+                # 绘制训练准确率和验证准确率
+                ax2.plot(range(1, len(train_accs) + 1), train_accs, 'red', label='train token acc', linewidth=2,
+                         linestyle='--')
+                ax2.plot(val_epochs, val_accs, 'orange', label='val token acc', linewidth=2, marker='s')
+                ax2.set_ylabel('Token Accuracy (%)', fontsize=12, color='red')
+                ax2.tick_params(axis='y', labelcolor='red')
+                # 设置准确率范围在0-100%
+                ax2.set_ylim(0, 100)
 
-            # 合并图例
-            lines1, labels1 = plt.gca().get_legend_handles_labels()
-            lines2, labels2 = ax2.get_legend_handles_labels()
-            plt.gca().legend(lines1 + lines2, labels1 + labels2, fontsize=10, loc='upper right')
+                # 合并图例
+                lines1, labels1 = ax1.get_legend_handles_labels()
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=10, loc='upper right')
 
-            plt.grid(True, alpha=0.3)
-            plt.savefig(f'pic/train/loss_acc_curve_epoch_{epoch + 1}.png', dpi=300, bbox_inches='tight')
-            plt.close()
-        except Exception as e:
-            print(f"绘制曲线失败: {str(e)}")
+                plt.title(f'PCB Transformer Training Metrics (Epoch {epoch + 1})', fontsize=14, fontweight='bold')
+                plt.tight_layout()
+                plt.savefig(f'pic/train/loss_acc_curve_epoch_{epoch + 1}.png', dpi=300, bbox_inches='tight')
+                plt.close()
+            except Exception as e:
+                print(f"绘制曲线失败: {str(e)}")
 
     # -------------------------- 训练完成 --------------------------
     print(f"\n训练流程全部完成！")
@@ -405,7 +328,7 @@ def test(test_flag=True):
     print(f"测试集目录: {os.path.abspath(config['test_dir'])}")
     print(f"使用设备: {config['device']}")
 
-    # -------------------------- 1. 初始化Tokenizer --------------------------
+    # -------------------------- 初始化Tokenizer --------------------------
     try:
         tokenizer = PCBTokenizer(encode_table_path=config["encode_table_path"])
         print(f"\n成功加载编码表，词汇表大小: {len(tokenizer.encode_table)}")
@@ -413,14 +336,10 @@ def test(test_flag=True):
         print(f"\n初始化Tokenizer失败: {str(e)}")
         return
 
-    # -------------------------- 2. 加载测试数据 --------------------------
+    # -------------------------- 加载测试数据 --------------------------
     try:
         # 加载测试集
-        test_dataset = PCBDataset(
-            data_dir=config["test_dir"],
-            tokenizer=tokenizer,
-            max_length=config["max_length"]
-        )
+        test_dataset = PCBDataset(data_dir=config["test_dir"], tokenizer=tokenizer, max_length=config["max_length"])
 
         print(f"\n成功加载测试数据集:")
         print(f"  测试集样本数: {len(test_dataset)}")
@@ -428,27 +347,13 @@ def test(test_flag=True):
         print(f"\n加载测试数据集失败: {str(e)}")
         return
 
-    # -------------------------- 3. 创建测试DataLoader --------------------------
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=1,
-        shuffle=False,  # 测试集不打乱
-        num_workers=4,
-        pin_memory=True
-    )
+    # -------------------------- 创建测试DataLoader --------------------------
+    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)
 
-    # -------------------------- 4. 加载模型 --------------------------
+    # -------------------------- 加载模型 --------------------------
     try:
         vocab_size = len(tokenizer.encode_table)
-        model = DecoderOnlyTransformer(
-            vocab_size=vocab_size,
-            d_model=config["d_model"],
-            nhead=config["nhead"],
-            num_layers=config["num_layers"],
-            dim_feedforward=config["dim_feedforward"],
-            dropout=config["dropout"]
-        ).to(config["device"])
-
+        model = GPTModel(vocab_size, config["d_model"], config["num_layers"], config["nhead"], config["dim_feedforward"], config["dropout"]).to(config["device"])
         # 加载最佳模型权重
         checkpoint = torch.load(config["save_path"], map_location=config["device"])
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -457,53 +362,72 @@ def test(test_flag=True):
         print(f"\n加载模型失败: {str(e)}")
         return
 
-    # -------------------------- 5. 进行测试 --------------------------
-    total_token_acc = 0
+    # -------------------------- 进行测试 --------------------------
+    total_token_acc = 0.0
+    test_count = 0
 
     try:
         for batch in tqdm(test_loader, desc="Testing"):
+            test_count += 1
             sample_tokens = batch["tokens"].to(config["device"])
-            sample_filename = batch["filename"]
+            sample_filename = batch["filename"][0]  # 从列表中获取文件名
             print(f"\n预测示例（测试集样本: {sample_filename}）")
 
             # 提取提示序列：从<SOS>到<SODPS>
-            sodps_token = tokenizer.special_tokens["<SODPS>"]
-            sodps_pos = find_token_position(sample_tokens, sodps_token)
-            if sodps_pos == -1:
+            cond_len = find_cond_length(sample_tokens[0, :])
+            if cond_len == -1:
                 print(f"样本 {sample_filename} 中未找到<SODPS>标记，无法生成提示")
-                return
+                continue
 
-            # 提示序列：包含<SOS>到<SODPS>的所有token
-            prompt_tokens = sample_tokens[:, :sodps_pos + 1].to(config["device"])
+            prompt_tokens = sample_tokens[:, :cond_len].to(config["device"])
 
             # 计算最大生成长度
-            max_gen_length = config["max_length"] - prompt_tokens.size(1)
-            if max_gen_length <= 0:
+            max_gen_len = config["max_length"] - prompt_tokens.size(1)
+            if max_gen_len <= 0:
                 print(f"提示序列长度已达到max_length，无法生成更多token")
-                return
+                continue
 
             # 生成布线信息
-            generated_tokens = predict_route(
-                model=model,
-                tokenizer=tokenizer,
-                prompt_tokens=prompt_tokens,
-                max_length=max_gen_length,
-                device=config["device"]
-            )
+            generated_tokens = test_model(model, prompt_tokens, sample_tokens, config["device"], max_gen_len, mask=False)
+
+            # 找到EOS位置
+            eos_pos_sample = find_token_position(sample_tokens[0, :], tokenizer.special_tokens['<EOS>'])
+            eos_pos_gen = find_token_position(generated_tokens[0, :], tokenizer.special_tokens['<EOS>'])
+
+            # 确保索引有效
+            end_pos_sample = eos_pos_sample if eos_pos_sample != -1 else config["max_length"]
+            end_pos_gen = eos_pos_gen if eos_pos_gen != -1 else config["max_length"]
 
             # 打印预测结果
             print(f"\n预测结果:")
-            print(f"  标签token：{sample_tokens[0, sodps_pos + 1:]}")
-            print(f"  生成token: {generated_tokens[0, sodps_pos + 1:]}")
-
+            print(f"  标签token：{sample_tokens[0, cond_len:end_pos_sample]}")
+            print(f"  生成token: {generated_tokens[0, cond_len:end_pos_gen]}")
 
             # 计算Token正确率
-            token_acc = sum((sample_tokens[0, sodps_pos + 1:] == generated_tokens[0, sodps_pos + 1:]) & (sample_tokens[0, sodps_pos + 1:] != 0).sum()) / torch.count_nonzero(sample_tokens[0, sodps_pos + 1:])
-            total_token_acc += token_acc / len(test_dataset)
-            print(f"  token准确率：{token_acc}")
+            valid_length = min(end_pos_sample - cond_len, end_pos_gen - cond_len)
+            if valid_length <= 0:
+                print(f"  无有效预测内容，跳过准确率计算")
+                continue
 
-        print(f"token正确率：{total_token_acc}")
+            valid_sample_tokens = sample_tokens[0, cond_len:cond_len + valid_length].cpu()
+            valid_gen_tokens = generated_tokens[0, cond_len:cond_len + valid_length].cpu()
 
+            # 计算非PAD token的准确率
+            non_pad_mask = (valid_sample_tokens != tokenizer.special_tokens['<PAD>'])
+            if non_pad_mask.sum() == 0:
+                token_acc = 0.0
+            else:
+                token_acc = (valid_sample_tokens[non_pad_mask] == valid_gen_tokens[
+                    non_pad_mask]).float().mean().item() * 100
+
+            total_token_acc += token_acc
+            print(f"  token准确率：{token_acc:.2f}%")
+
+        if test_count > 0:
+            avg_token_acc = total_token_acc / test_count
+            print(f"\n测试集平均token正确率：{avg_token_acc:.2f}%")
+        else:
+            print("\n没有有效的测试样本")
     except Exception as e:
         print(f"\n预测示例失败: {str(e)}")
         return
@@ -514,8 +438,8 @@ def test(test_flag=True):
 
 if __name__ == "__main__":
     # 可以通过修改这两个标志来控制执行训练还是测试
-    train_flag = False
-    test_flag = True
+    train_flag = True
+    test_flag = False
 
     if train_flag:
         train()
